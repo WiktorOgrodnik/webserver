@@ -90,32 +90,38 @@ struct http_request_header* http_request_header_parse(char buffer[], int* error)
 	return header;
 }
 
-void get_host(struct http_request_header* header, char* host_name) {
+char* http_request_get_data(struct http_request_header* header, const char* const name) {
 
 	for (size_t i = 0; i < header->number_of_fields; i++) {
-		if (strcmp("Host", header->fields[i].field_name) == 0) {
-			strcpy(host_name, header->fields[i].field_content);
-
-			char* colon = strchr(host_name, ':');
-			if (colon) *colon = '\0';
-
-			return;
+		if (strcmp(name, header->fields[i].field_name) == 0) {
+			return header->fields[i].field_content;
 		}
 	}
 
-	strcpy(host_name, "none");
+	return NULL;
 }
 
-bool connection_to_close(struct http_request_header* header) {
+bool http_request_content_equal(struct http_request_header* header, const char* const name, const char* const content) {
+	char* real_content = http_request_get_data(header, name);
+	return real_content != NULL && strcmp(content, real_content) == 0;
+}
 
-	for (size_t i = 0; i < header->number_of_fields; i++) {
-		if (strcmp("Connection", header->fields[i].field_name) == 0) {
-			if (strcmp("close", header->fields[i].field_content) == 0) {
-				return true;
-			}
-			return false;
-		}
+char* http_request_get_host(struct http_request_header* header) {
+
+	char* real_host = http_request_get_data(header, "Host");
+	
+	if (real_host) {
+
+		char* text;
+		if ((text = (char*)malloc(strlen(real_host))) == NULL) {exit(EXIT_FAILURE);}
+
+		strcpy(text, real_host);
+
+		char* colon = strchr(text, ':');
+		if (colon) *colon = '\0';
+
+		return text;
 	}
 
-	return false;
+	return NULL;
 }

@@ -12,7 +12,8 @@ struct http_request_header {
 };
 
 struct http_request_header* http_request_header_parse(char buffer[], int* error);
-void get_host(struct http_request_header* header, char* host_name);
-bool connection_to_close(struct http_request_header* header);
+char* http_request_get_data(struct http_request_header* header, const char* const name);
+bool http_request_content_equal(struct http_request_header* header, const char* const name, const char* const content);
+char* http_request_get_host(struct http_request_header* header);
 
 #endif

@@ -1,8 +1,3 @@
-/**
-*	Wiktor Ogrodnik
-*	323129
-*/
-
 #include "http_response.h"
 #include <stdint.h>
 
@@ -20,9 +15,7 @@ static int init_server(u_int16_t port, int backlog) {
 	check((server_socket = socket(AF_INET, SOCK_STREAM, 0)), "Socket error");
 
 	bzero(&server_addr, sizeof(server_addr));
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_addr.s_addr = INADDR_ANY;
-	server_addr.sin_port = htons(port);
+	server_addr = (struct sockaddr_in){ .sin_family = AF_INET, .sin_addr.s_addr = INADDR_ANY, .sin_port = htons(port)};
 
 	check(bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)), "bind error");
 	check(listen(server_socket, backlog), "listen error");
@@ -55,20 +48,20 @@ void* handle_connection(void* data) {
 
 	struct timeval tv; tv.tv_sec = CONNECTION_TIMEOUT; tv.tv_usec = 0;
 
-	for (ever) {
+	for (;;) {
 
 		u_int8_t* recv_buffer = (u_int8_t*)malloc(BUFFER_SIZE);
 		u_int8_t* temporary_buffer = (u_int8_t*)malloc(BUFFER_SIZE);
 
 		ssize_t bytes_read = 0;
-
+		int ready;
+		
 		while (incomplete_http_request(recv_buffer, bytes_read)) {
 
 			fd_set descriptors;
 			FD_ZERO(&descriptors);
 			FD_SET(client_socket, &descriptors);
 
-			int ready; 
 			check((ready = select(client_socket + 1, &descriptors, NULL, NULL, &tv)), "select error");
 			if (ready == 0) break;
 
@@ -80,21 +73,30 @@ void* handle_connection(void* data) {
 			recv_buffer[bytes_read] = '\0';
 		}
 
-		free(temporary_buffer);
 		
 		int error = 0;
 		struct http_request_header* http_header = http_request_header_parse((char*)recv_buffer, &error);
+
+		free(temporary_buffer);
+		free(recv_buffer);
+
 		if (http_header == NULL) {
 			if (error == 403) { http_response_send_forbidden(client_socket);}
 			else if (error == 500) { fprintf(stderr, "%s\n", http_code_string[INTERNAL_SERVER_ERROR]); exit(EXIT_FAILURE);}
-			else if (error == 501) { http_response_send_not_implemented(client_socket); break;}
+			else { http_response_send_not_implemented(client_socket); break;}
 		} else {
 
 			char filename[2000];
-			char host_name[200];
-
-			get_host(http_header, host_name);
+			char* host_name;
+			
+			if ((host_name = http_request_get_host(http_header)) == NULL) {
+				http_response_send_not_implemented(client_socket);
+				break;
+			}
+			
 			sprintf(filename, "./%s/%s/%s", catalog_name, host_name, http_header->url);
+
+			free(host_name);
 			struct stat st;
 
 			if (access(filename, F_OK) == 0) {
@@ -104,7 +106,7 @@ void* handle_connection(void* data) {
 				else http_response_send_redirect(http_header, client_socket);
 			} else http_response_send_not_found(client_socket);
 
-			if (connection_to_close(http_header)) break;
+			if (http_request_content_equal(http_header, "Connection", "close")) break;
 		}
 	}
 
