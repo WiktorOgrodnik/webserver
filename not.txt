@@ -6,3 +6,5 @@ hang on accept in main function! <- done
 abstract send and get_data_from_request_field
 refactorize request header parser
 read/fread oraz sendfile/send open/fopen
+implement Trie tree
+Change numeric codes to ENUM http codes

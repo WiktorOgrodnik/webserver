@@ -1,8 +1,6 @@
 #include "http_response.h"
 #include <stdint.h>
 
-#define ever ;;
-
 char* catalog_name;
 
 #define BUFFER_SIZE 10000000
@@ -96,7 +94,6 @@ void* handle_connection(void* data) {
 			
 			sprintf(filename, "./%s/%s/%s", catalog_name, host_name, http_header->url);
 
-			free(host_name);
 			struct stat st;
 
 			if (access(filename, F_OK) == 0) {
@@ -107,6 +104,9 @@ void* handle_connection(void* data) {
 			} else http_response_send_not_found(client_socket);
 
 			if (http_request_content_equal(http_header, "Connection", "close")) break;
+
+			http_request_header_destroy(http_header);
+			free(http_header);
 		}
 	}
 
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
 
 	int server_socket = init_server(port, 64);
 
-	for (ever) {
+	for (;;) {
 
 		int* client_socket = (int*)malloc(sizeof(int));
 		if (client_socket == NULL) ERROR("malloc error");

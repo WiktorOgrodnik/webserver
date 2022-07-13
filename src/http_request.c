@@ -6,6 +6,24 @@
 #include "http_request.h"
 #include <ctype.h>
 
+/** Auxilary functions **/
+
+static bool filter_url(char* url);
+static void trim(char* source);
+static char* next_word(char* buffer, int separator, int* error);
+
+/** Internal http_request functions **/
+
+static size_t http_header_number_of_fields(const char* buffer);
+
+static struct http_request_header* http_request_header_init(char* buffer, 
+													int* error, 
+													size_t* number_of_fields);
+
+static char* http_request_retrieve_first_line(struct http_request_header* header, char* buffer, int* error);
+
+static char* http_request_internal_get_host(struct http_request_header* header, int* error);
+
 static void http_request_init_field(struct http_header_field* const field,
                              const char* const name, 
 							 const char* const content);
@@ -13,6 +31,9 @@ static void http_request_init_field(struct http_header_field* const field,
 static void http_request_insert_field(struct http_request_header* const header, 
 							   const char* const name, 
 							   const char* const content);
+
+
+/** Definisions **/
 
 static bool filter_url(char* url) {
 	char* t = strchr(url, '.');
@@ -30,6 +51,13 @@ static void trim(char* source) {
     } while ((*source++ = *d++));
 }
 
+static char* next_word(char* buffer, int separator, int* error) {
+
+	char* next = strchr(buffer, separator);
+	if (next == NULL) *error = 501;
+	return next;
+}
+
 static size_t http_header_number_of_fields(const char* buffer) {
 
 	int num = -2;
@@ -42,66 +70,77 @@ static size_t http_header_number_of_fields(const char* buffer) {
 	return num < 0 ? 0ULL : (size_t)num;
 }
 
-static struct http_request_header* http_request_header_init(char* buffer, int* error) {
+static struct http_request_header* http_request_header_init(char* buffer, 
+													int* error, 
+													size_t* number_of_fields)
+{
 
-	size_t number_of_fields = http_header_number_of_fields(buffer);
+	size_t num = http_header_number_of_fields(buffer);
 
-	if (number_of_fields == 0) { *error = 501; return NULL; }
+	if (num == 0) { *error = 501; return NULL; }
 
-	struct http_request_header* header = (struct http_request_header*)malloc(sizeof(struct http_request_header) 
-											+ (size_t)number_of_fields * sizeof(struct http_header_field));
+	*number_of_fields = num;
 
-	if (header == NULL) { *error = 500; return NULL;}
-
-
-}
-
-struct http_request_header* http_request_header_parse(char buffer[], int* error) {
-
-	struct http_request_header* header = http_request_header_init(buffer, error);
+	struct http_request_header* header = malloc(sizeof(struct http_request_header) 
+									            + (size_t)num * sizeof(struct http_header_field));
 
 	if (header == NULL) { *error = 500; return NULL;}
 
 	header->number_of_fields = 0;
+
+	return header;
+}
+
+// returns pointer to next line
+static char* http_request_retrieve_first_line(struct http_request_header* header, char* buffer, int* error) {
+
+	char* end_line = next_word(buffer, '\n', error);
+	if (end_line) *(end_line++) = '\0'; else return NULL;
 	
-	size_t first_line_len = strchr(buffer, '\n') - buffer - 1;
+	char* option = buffer;
+	
+	char* path = next_word(buffer, ' ', error);
+	if (path) *(path++) = '\0'; else return NULL;
 
-	char option[10];
-	char protocol[10];
-	char* path = (char*)malloc(first_line_len * sizeof(char));
-	if (path == NULL) { *error = 500; return NULL; }
+	char* protocol = next_word(path, ' ', error);
+	if (protocol) *(protocol++) = '\0'; else return NULL;
 
-	sscanf(buffer, "%8s %s %9s", option, path, protocol);
+	/* Command sanitize */
 
+	// TO REPLACE WITH OTHER SOLUTION
+	if (strcmp(option, "GET") != 0) {*error = 501; return NULL; } // Temporary patch, other functions than GET does not work now
 	header->command = GET;
-	header->url = (char*)malloc(strlen(path) * sizeof(char) + 1);
-	header->protocol_ver = (char*)malloc(strlen(protocol) * sizeof(char) + 1);
 
-	if (header->url == NULL || header->protocol_ver == NULL) {*error = 500; return NULL; }
+	/* URL sanitize */
 
+	if (!filter_url(path)) { *error = 403; return NULL; }
+
+	if ((header->url = malloc((protocol - path) * sizeof(char))) == NULL) { *error = 500; return NULL; }
 	strcpy(header->url, path);
+
+	/* Protocol sanitize */
+
+	if ((header->protocol_ver = malloc((end_line - protocol) * sizeof(char))) == NULL) { *error = 500; return NULL; }
 	strcpy(header->protocol_ver, protocol);
 
-	if (!filter_url(header->url)) { *error = 403; return NULL; }
+	return end_line;
+}
 
-	buffer = strchr(buffer, '\n') + 1;
+static char* http_request_internal_get_host(struct http_request_header* header, int* error) {
 
-	for (int i = 0; i < number_of_fields; i++) {
-		char* next_buffer = strchr(buffer, '\n');
-		*(next_buffer++) = '\0';
-
-		char* colon_buffer = strchr(buffer, ':');
-		if (colon_buffer == NULL) { *error = 501; return NULL; }
-
-		*(colon_buffer++) = '\0';
-		if (*colon_buffer == ' ') colon_buffer++;
-
-		http_request_insert_field(header, buffer, colon_buffer);
-
-		buffer = next_buffer;
-	}
+	char* real_host = http_request_get_data(header, "Host");
 	
-	return header;
+	if (real_host == NULL) { *error = 501; return NULL; }
+
+	char* text;
+	if ((text = malloc(strlen(real_host))) == NULL) { *error = 500; return NULL; }
+
+	strcpy(text, real_host);
+
+	char* colon = next_word(text, ':', error);
+	if (colon) *colon = '\0';
+
+	return text;
 }
 
 static void http_request_init_field(struct http_header_field* const field,
@@ -110,10 +149,10 @@ static void http_request_init_field(struct http_header_field* const field,
 {
 	if (field == NULL) return;
 
-	if ((field->field_name = (char*)malloc((strlen(name) + 1) * sizeof(char))) == NULL)
+	if ((field->field_name = malloc((strlen(name) + 1) * sizeof(char))) == NULL)
 		exit(EXIT_FAILURE);
 
-	if ((field->field_content = (char*)malloc((strlen(content) + 1) * sizeof(char))) == NULL)
+	if ((field->field_content = malloc((strlen(content) + 1) * sizeof(char))) == NULL)
 		exit(EXIT_FAILURE);
 
 	strcpy(field->field_name, name); strcpy(field->field_content, content);
@@ -132,6 +171,33 @@ static void http_request_insert_field(struct http_request_header* const header,
 	http_request_init_field(&header->fields[number_of_fields], name, content);
 
 	header->number_of_fields++;
+}
+
+struct http_request_header* http_request_header_parse(char buffer[], int* error) {
+
+	struct http_request_header* header = NULL;
+	size_t number_of_fields = 0;
+	
+	if ((header = http_request_header_init(buffer, error, &number_of_fields)) == NULL) return NULL;	
+	if ((buffer = http_request_retrieve_first_line(header, buffer, error)) == NULL) return NULL;
+
+	for (size_t i = 0; i < number_of_fields; i++) {
+		
+		char* name = buffer;
+
+		char* content = next_word(name, ':', error);
+		if (content) *(content++) = '\0'; else return NULL;
+
+		buffer = next_word(content, '\n', error);
+		if (buffer) *(buffer++) = '\0'; else return NULL;
+
+		http_request_insert_field(header, name, content);
+	}
+
+	char* host = http_request_internal_get_host(header, error);
+	if (host) header->host = host; else { *error = 501; return NULL; }
+	
+	return header;
 }
 
 char* http_request_get_data(struct http_request_header* header, const char* const name) {
@@ -154,20 +220,16 @@ bool http_request_content_equal(struct http_request_header* header,
 }
 
 char* http_request_get_host(struct http_request_header* header) {
+	return header->host;
+}
 
-	char* real_host = http_request_get_data(header, "Host");
-	
-	if (real_host) {
-		char* text;
-		if ((text = (char*)malloc(strlen(real_host))) == NULL) { exit(EXIT_FAILURE); }
+void http_request_header_destroy(struct http_request_header* header) {
+	free(header->url);
+	free(header->host);
+	free(header->protocol_ver);
 
-		strcpy(text, real_host);
-
-		char* colon = strchr(text, ':');
-		if (colon) *colon = '\0';
-
-		return text;
+	for (size_t i = 0; i < header->number_of_fields; i++) {
+		free(header->fields[i].field_name);
+		free(header->fields[i].field_content);
 	}
-
-	return NULL;
 }
