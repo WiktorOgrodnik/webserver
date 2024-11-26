@@ -1,18 +1,23 @@
-#include "http_response.h"
+#include "http_common.h"
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
 
-char* catalog_name;
-
-#define BUFFER_SIZE 10000000
+#define BUFFER_SIZE 65536 // 65535 + 1
 #define CONNECTION_TIMEOUT 1000
 
 static int init_server(u_int16_t port, int backlog) {
 	int server_socket;
 	struct sockaddr_in server_addr;
 
-	check((server_socket = socket(AF_INET, SOCK_STREAM, 0)), "Socket error");
+	check((server_socket = socket(AF_INET, SOCK_STREAM, 0)), "socket error");
 
-	bzero(&server_addr, sizeof(server_addr));
+  if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0)
+    printf("setsockopt(SO_REUSEADDR) failed");
+
+  bzero(&server_addr, sizeof(server_addr));
 	server_addr = (struct sockaddr_in){ .sin_family = AF_INET, .sin_addr.s_addr = INADDR_ANY, .sin_port = htons(port)};
 
 	check(bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)), "bind error");
@@ -30,13 +35,42 @@ static int accept_connection(int server_socket) {
 	return client_socket;
 }
 
-static bool incomplete_http_request(u_int8_t* buffer, ssize_t buffer_size) {
+static inline void chr_swap(char* a, char* b) {
+  *a ^= *b; *b ^= *a; *a ^= *b;
+}
 
-	if (buffer_size == 0) return true;
+static void strrev(char* start, char* end) {
+  while (start < end)
+    chr_swap(start++, end--);
+}
 
-	uintptr_t end_of_http = (uintptr_t)strstr((char*)buffer, "\r\n\r\n") | (uintptr_t)strstr((char*)buffer, "\n\n");
+static bool wspak_incomplete_request(u_int8_t* buffer, ssize_t buffer_size) {
 
-	return end_of_http == 0; //return true if \r\n\r\n not found, the message is incomplete
+  if (buffer_size == 0)
+    return true;
+  else if (buffer_size > BUFFER_SIZE)
+    return false; 
+
+	uintptr_t end_of_wspak = (uintptr_t)strstr((char*)buffer, "\r\n");
+
+	return end_of_wspak == 0; //return true if \r\n not found, the message is incomplete
+}
+
+static size_t wspak_request_len(u_int8_t* buffer) {
+  uintptr_t start = (uintptr_t)buffer;
+	uintptr_t end = (uintptr_t)strstr((char*)buffer, "\r\n");
+
+  return end - start;
+}
+
+static void wspak_response_send(u_int8_t* buffer, ssize_t request_size, int client_socket) {
+	u_int8_t* reply_buffer = (u_int8_t*)malloc(sizeof(u_int8_t) * (request_size + 2));
+	memcpy(reply_buffer, buffer, request_size + 2);
+
+  strrev((char*)reply_buffer, (char*)reply_buffer + request_size);
+
+	check((send(client_socket, reply_buffer, request_size + 2, 0)), "send error");
+	free(reply_buffer);
 }
 
 void* handle_connection(void* data) {
@@ -46,7 +80,7 @@ void* handle_connection(void* data) {
 
 	struct timeval tv; tv.tv_sec = CONNECTION_TIMEOUT; tv.tv_usec = 0;
 
-	for (;;) {
+  for (;;) {
 
 		u_int8_t* recv_buffer = (u_int8_t*)malloc(BUFFER_SIZE);
 		u_int8_t* temporary_buffer = (u_int8_t*)malloc(BUFFER_SIZE);
@@ -54,14 +88,14 @@ void* handle_connection(void* data) {
 		ssize_t bytes_read = 0;
 		int ready;
 		
-		while (incomplete_http_request(recv_buffer, bytes_read)) {
-
+		while (wspak_incomplete_request(recv_buffer, bytes_read)) {
 			fd_set descriptors;
 			FD_ZERO(&descriptors);
 			FD_SET(client_socket, &descriptors);
 
 			check((ready = select(client_socket + 1, &descriptors, NULL, NULL, &tv)), "select error");
-			if (ready == 0) break;
+			if (ready == 0)
+        break;
 
 			ssize_t temp_bytes_read = 0;
 			check((temp_bytes_read = recv(client_socket, temporary_buffer, BUFFER_SIZE, 0)), "recv error");
@@ -71,86 +105,58 @@ void* handle_connection(void* data) {
 			recv_buffer[bytes_read] = '\0';
 		}
 
-		
-		int error = 0;
-		struct http_request_header* http_header = http_request_header_parse((char*)recv_buffer, &error);
-
-		free(temporary_buffer);
-		free(recv_buffer);
-
-		if (http_header == NULL) {
-			if (error == 403) { http_response_send_forbidden(client_socket);}
-			else if (error == 500) { fprintf(stderr, "%s\n", http_code_string[INTERNAL_SERVER_ERROR]); exit(EXIT_FAILURE);}
-			else { http_response_send_not_implemented(client_socket); break;}
+		if (bytes_read > BUFFER_SIZE) {
+      // error
+			fprintf(stderr, "%s\n", "BUFFER overflow");
+      exit(EXIT_FAILURE);
 		} else {
+      size_t request_len = wspak_request_len(recv_buffer);
 
-			char filename[2000];
-			char* host_name;
+			if (request_len == 0) 
+        goto server_close;
 			
-			if ((host_name = http_request_get_host(http_header)) == NULL) {
-				http_response_send_not_implemented(client_socket);
-				break;
-			}
-			
-			sprintf(filename, "./%s/%s/%s", catalog_name, host_name, http_header->url);
-
-			struct stat st;
-
-			if (access(filename, F_OK) == 0) {
-				check(stat(filename, &st), "stat error");
-
-				if (S_ISREG(st.st_mode)) http_response_send_file(&st, http_header, filename, client_socket);
-				else http_response_send_redirect(http_header, client_socket);
-			} else http_response_send_not_found(client_socket);
-
-			if (http_request_content_equal(http_header, "Connection", "close")) break;
-
-			http_request_header_destroy(http_header);
-			free(http_header);
+			wspak_response_send(recv_buffer, request_len, client_socket);
 		}
+
+    free(temporary_buffer);
+		free(recv_buffer);
 	}
-
+server_close:
 	check(close(client_socket), "close error");
-
 	return NULL;
 }
 
 int main(int argc, char** argv) {
 	
-	if (argc != 3) {
-		printf("USAGE: %s <port> <catalog_name>\n", argv[0]);
+	if (argc != 2) {
+		printf("USAGE: %s <port>\n", argv[0]);
 		return EXIT_SUCCESS;
 	}
 
 	pthread_attr_t detached; 
 
 	pthread_attr_init(&detached);
-    pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED);
+  pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED);
 
 	u_int16_t port = (u_int16_t)atoi(argv[1]);
-	size_t catalog_name_size = strlen(argv[2]);
-	catalog_name = (char*)malloc(catalog_name_size * sizeof(char));
-	if (catalog_name == NULL) ERROR("Can not allocate catalog name string!");
-
-	strncpy(catalog_name, argv[2], catalog_name_size);
-
 	int server_socket = init_server(port, 64);
 
 	for (;;) {
 
 		int* client_socket = (int*)malloc(sizeof(int));
-		if (client_socket == NULL) ERROR("malloc error");
+		if (client_socket == NULL)
+      ERROR("malloc error");
 
 		*client_socket = accept_connection(server_socket);
 
 		pthread_t thread;
 		int error = pthread_create(&thread, &detached, &handle_connection, (void*)client_socket);
-		if (error) ERROR("Failed to create a thread!");
+		if (error)
+      ERROR("Failed to create a thread!");
 
 		client_socket = NULL;
 	}
 
-	free(catalog_name);
 	pthread_attr_destroy(&detached);
 
 	return EXIT_SUCCESS;
