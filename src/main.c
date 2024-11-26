@@ -4,9 +4,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
+#include <gnutls/gnutls.h>
 
 #define BUFFER_SIZE 65536 // 65535 + 1
 #define CONNECTION_TIMEOUT 1000
+
+#define CERT_FILE "test.crt"
+#define KEY_FILE "test.key"
+
+gnutls_certificate_credentials_t x509_cred;
 
 static int init_server(u_int16_t port, int backlog) {
 	int server_socket;
@@ -63,13 +69,13 @@ static size_t wspak_request_len(u_int8_t* buffer) {
   return end - start;
 }
 
-static void wspak_response_send(u_int8_t* buffer, ssize_t request_size, int client_socket) {
+static void wspak_response_send(u_int8_t* buffer, ssize_t request_size, gnutls_session_t session) {
 	u_int8_t* reply_buffer = (u_int8_t*)malloc(sizeof(u_int8_t) * (request_size + 2));
 	memcpy(reply_buffer, buffer, request_size + 2);
 
   strrev((char*)reply_buffer, (char*)reply_buffer + request_size);
 
-	check((send(client_socket, reply_buffer, request_size + 2, 0)), "send error");
+	check((gnutls_record_send(session, reply_buffer, request_size + 2)), "send error");
 	free(reply_buffer);
 }
 
@@ -79,6 +85,18 @@ void* handle_connection(void* data) {
 	free(data);
 
 	struct timeval tv; tv.tv_sec = CONNECTION_TIMEOUT; tv.tv_usec = 0;
+
+  gnutls_session_t session;
+
+  gnutls_init(&session, GNUTLS_SERVER);
+  gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, x509_cred);
+  gnutls_priority_set_direct(session, "NORMAL", NULL);
+  gnutls_transport_set_int(session, client_socket);
+
+  if (gnutls_handshake(session) < 0) {
+    fprintf(stderr, "Handshake error\n");
+    goto handshake_fail_cleanup;
+  }
 
   for (;;) {
 
@@ -98,7 +116,7 @@ void* handle_connection(void* data) {
         break;
 
 			ssize_t temp_bytes_read = 0;
-			check((temp_bytes_read = recv(client_socket, temporary_buffer, BUFFER_SIZE, 0)), "recv error");
+			check((temp_bytes_read = gnutls_record_recv(session, temporary_buffer, BUFFER_SIZE)), "recv error");
 			memcpy(recv_buffer + bytes_read, temporary_buffer, (size_t)temp_bytes_read);
 
 			bytes_read += temp_bytes_read;
@@ -112,18 +130,27 @@ void* handle_connection(void* data) {
 		} else {
       size_t request_len = wspak_request_len(recv_buffer);
 
-			if (request_len == 0) 
-        goto server_close;
+			fprintf(stderr, "request_len: %lu\n", request_len);
+			if (request_len == 0) {
+			  fprintf(stderr, "closing\n");
+        break;
+      }
+
+			fprintf(stderr, "Request: %s\n", recv_buffer);
 			
-			wspak_response_send(recv_buffer, request_len, client_socket);
+			wspak_response_send(recv_buffer, request_len, session);
 		}
 
     free(temporary_buffer);
 		free(recv_buffer);
 	}
-server_close:
+
+  gnutls_bye(session, GNUTLS_SHUT_RDWR);
+handshake_fail_cleanup:
+  gnutls_deinit(session);
 	check(close(client_socket), "close error");
-	return NULL;
+
+  return NULL;
 }
 
 int main(int argc, char** argv) {
@@ -138,11 +165,16 @@ int main(int argc, char** argv) {
 	pthread_attr_init(&detached);
   pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED);
 
-	u_int16_t port = (u_int16_t)atoi(argv[1]);
+ 	u_int16_t port = (u_int16_t)atoi(argv[1]);
 	int server_socket = init_server(port, 64);
 
-	for (;;) {
+  gnutls_certificate_allocate_credentials(&x509_cred);
+  if (gnutls_certificate_set_x509_key_file(x509_cred, CERT_FILE, KEY_FILE, GNUTLS_X509_FMT_PEM) < 0) {
+    fprintf(stderr, "Failed to load cert files\n");
+    exit(EXIT_FAILURE);
+  }
 
+	for (;;) {
 		int* client_socket = (int*)malloc(sizeof(int));
 		if (client_socket == NULL)
       ERROR("malloc error");
@@ -156,7 +188,8 @@ int main(int argc, char** argv) {
 
 		client_socket = NULL;
 	}
-
+  
+  gnutls_certificate_free_credentials(x509_cred);
 	pthread_attr_destroy(&detached);
 
 	return EXIT_SUCCESS;

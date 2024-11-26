@@ -2,11 +2,16 @@ CC = gcc
 SRC_DIR = src
 INC_DIR = .
 OBJ_DIR = obj
-CFLAGS = -std=gnu18 -pthread -Wall -Wextra -Wpedantic -O2
+CFLAGS = -std=gnu18 -pthread -Wall -Wextra -Wpedantic -O2 -lgnutls
 NAME = webserver
+NAME2 = client
 OBJS = $(addprefix $(OBJ_DIR)/, main.o http_common.o http_response.o http_request.o)
+OBJS2 = $(addprefix $(OBJ_DIR)/, client.o http_common.o http_response.o http_request.o)
 
 all: prog
+
+client: pre $(OBJS2)
+	@$(CC) $(CFLAGS) $(OBJS2) -o $(NAME2)
 
 prog: pre $(OBJS)
 	@$(CC) $(CFLAGS) $(OBJS) -o $(NAME)
